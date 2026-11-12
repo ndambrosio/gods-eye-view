@@ -1,0 +1,36 @@
+# Build-context filter for deploy/Dockerfile. Docker reads this file INSTEAD of
+# the root .dockerignore for that Dockerfile, so the first block repeats
+# upstream's list; keep it in step when syncing the fork.
+.git
+node_modules
+dist
+.env
+.env.*
+!.env.example
+**/ENVIRONMENT
+pinokio/ENVIRONMENT
+pinokio/.installed
+.gev-cache
+.gev-logs
+qa-artifacts
+qa-shots
+screenshots
+output
+3d-models
+.gstack
+*.log
+.DS_Store
+._*
+
+# Hosting-only additions. Runtime key files live next to compose.yaml and must
+# never be copied into an image, even when it is built on the host that holds
+# them.
+**/*.env
+.cache
+.claude
+.playwright-mcp
+
+# ~70MB of README media and prose the server never reads.
+docs
+changelog.d
+CHANGELOG.md

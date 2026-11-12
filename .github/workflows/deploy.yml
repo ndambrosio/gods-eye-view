@@ -1,0 +1,100 @@
+name: Deploy image
+
+# Fork-only. Builds the hosting image (deploy/Dockerfile), proves the container
+# serves the app, and on main publishes it to this repository's GitHub
+# Container Registry. The host then pulls it (deploy/README.md).
+#
+# Pull requests get the build and the smoke test, never a publish.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    name: Build, smoke-test, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The three browser keys are compiled into the bundle by design
+      # (SECURITY.md); each is optional and skipped when its secret is unset.
+      # Server-side keys are never build inputs: they are set on the host.
+      - name: Build image
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          CESIUM_ION_TOKEN: ${{ secrets.CESIUM_ION_TOKEN }}
+          MAPILLARY_CLIENT_TOKEN: ${{ secrets.MAPILLARY_CLIENT_TOKEN }}
+        run: |
+          build_secrets=()
+          for name in GOOGLE_MAPS_API_KEY CESIUM_ION_TOKEN MAPILLARY_CLIENT_TOKEN; do
+            if [[ -n "${!name}" ]]; then
+              build_secrets+=(--secret "id=${name},env=${name}")
+              echo "Browser key included: ${name}"
+            fi
+          done
+          docker build \
+            --file deploy/Dockerfile \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            "${build_secrets[@]}" \
+            --tag gev:candidate \
+            .
+
+      - name: Smoke-test the container
+        run: |
+          docker run --detach --name gev --publish 127.0.0.1:4173:4173 gev:candidate
+          for attempt in $(seq 1 60); do
+            curl --silent --fail --output /dev/null http://127.0.0.1:4173/ && break
+            sleep 2
+          done
+
+          echo "App shell is served"
+          page="$(curl --silent --show-error --fail http://127.0.0.1:4173/)"
+          grep --quiet "God's Eye View" <<< "${page}"
+
+          echo "Provider middleware is mounted (keyless vessels route answers for itself)"
+          vessels="$(curl --silent http://127.0.0.1:4173/api/vessels)"
+          grep --quiet '"missing-key"' <<< "${vessels}"
+
+          echo "Key-entry endpoints are absent from the hosted build"
+          [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4173/api/setup/status)" == 404 ]]
+
+          echo "Unlisted Host headers are refused"
+          [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header 'Host: not-allowed.example' http://127.0.0.1:4173/)" == 403 ]]
+
+          echo "Container does not run as root"
+          [[ "$(docker exec gev id -u)" != 0 ]]
+
+      - name: Container log
+        if: always()
+        run: docker logs gev || true
+
+      - name: Publish to GitHub Container Registry
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          for tag in latest "sha-${GITHUB_SHA::12}"; do
+            docker tag gev:candidate "${image}:${tag}"
+            docker push "${image}:${tag}"
+          done
+          echo "Published ${image}:sha-${GITHUB_SHA::12} (also :latest)" >> "${GITHUB_STEP_SUMMARY}"

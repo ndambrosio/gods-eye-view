@@ -1,0 +1,53 @@
+# Hosted instance (fork-only). The root compose.yaml is upstream's local-dev
+# setup; this one runs the image that .github/workflows/deploy.yml publishes.
+#
+#   cp gev.env.example gev.env      # then fill in what you want
+#   docker compose up -d            # private: reachable from this host only
+#   docker compose --profile tunnel up -d   # plus Cloudflare Tunnel (see README.md)
+#
+# Update after a push to main:  docker compose pull && docker compose up -d
+name: gods-eye-view
+
+services:
+  app:
+    image: ${GEV_IMAGE:-ghcr.io/ndambrosio/gods-eye-view:latest}
+    restart: unless-stopped
+    env_file:
+      - gev.env
+    ports:
+      # Loopback only. This server brokers every key in gev.env to whoever can
+      # reach it, so widen this deliberately (a tailnet address, for example:
+      # GEV_BIND=100.64.0.5), never to 0.0.0.0 on a machine with a public IP.
+      - "${GEV_BIND:-127.0.0.1}:${GEV_PORT:-4173}:4173"
+    volumes:
+      - gev-cache:/app/.gev-cache
+      - gev-logs:/app/.gev-logs
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # Optional public URL with a login in front: a Cloudflare Tunnel dials out, so
+  # the host needs no open inbound port. Put a Cloudflare Access policy on the
+  # hostname BEFORE starting this, and point the tunnel's public hostname at
+  # http://app:4173. Upstream refuses key-spending routes that arrive through a
+  # proxy; README.md lists what that turns off.
+  tunnel:
+    profiles:
+      - tunnel
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    env_file:
+      - tunnel.env
+    depends_on:
+      app:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  gev-cache:
+  gev-logs:
